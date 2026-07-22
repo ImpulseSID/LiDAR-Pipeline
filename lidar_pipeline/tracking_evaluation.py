@@ -163,10 +163,12 @@ def _read_calib(seq: str, calib_dir: Path) -> dict[str, np.ndarray]:
             line = line.strip()
             if not line:
                 continue
-            key, _, values = line.partition(":")
-            key = key.strip()
+            tokens = line.split()
+            # KITTI tracking calib mixes "P0: ..." (colon) and "R_rect ..." (no
+            # colon); the first token is always the key.
+            key = tokens[0].rstrip(":")
             try:
-                nums = np.array([float(v) for v in values.split()], dtype=np.float64)
+                nums = np.array([float(t) for t in tokens[1:]], dtype=np.float64)
             except ValueError:
                 continue
             mats[key] = nums
