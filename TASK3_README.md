@@ -105,14 +105,38 @@ gdown 1wMxWTpU1qUoY3DsCH31WJmvJxcjFXKlm -O ~/pointpillar_7728.pth   # ~19 MB
 ---
 
 ## Generate adversarial frames
-POPA frames come from the Module‑4 attack (numpy‑only, CPU):
+POPA frames come from the Module‑4 attack (numpy‑only, CPU).
+
+**Single sequence** (flat output — `adv_0000.bin … adv_0153.bin`, attacked +
+clean‑copy cooldown frames):
 ```bash
 cd <repo-root>
 python -m lidar_pipeline.attack --seq 0000 --start 0 --count 154 \
        --core-fraction 0.12 --n-flicker 6 --out ./adv_frames
 ```
-Writes `adv_0000.bin … adv_0153.bin` (attacked + clean‑copy cooldown frames). For
-multiple sequences, write per‑seq subfolders (`adv_frames/<seq>/…`).
+
+**Multiple sequences** — pass several ids (or `all`) to `--seq`. With more than
+one sequence the attack writes per‑sequence subfolders `<out>/<seq>/` (with a
+single sequence it stays flat), which is exactly what the evaluator reads with
+`--adv-dir ./adv_frames --seq all`.
+
+```bash
+cd <repo-root>
+
+# a specific subset
+python -m lidar_pipeline.attack --seq 0000 0001 0002 --start 0 --count 100000 \
+       --core-fraction 0.12 --n-flicker 6 --out ./adv_frames
+
+# every available sequence, all frames
+python -m lidar_pipeline.attack --seq all --start 0 --count 100000 \
+       --core-fraction 0.12 --n-flicker 6 --out ./adv_frames
+```
+`--count` is clamped to each sequence's length, so a large value (e.g. `100000`)
+simply means "all frames of every sequence". Output layout:
+`./adv_frames/0000/adv_0000.bin`, `./adv_frames/0001/…`, etc.
+
+Then evaluate them all at once with `--adv-dir <repo>/adv_frames --seq all`
+(Table 2 gets a row per sequence; Table 1 aggregates them).
 
 ---
 
