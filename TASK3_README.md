@@ -140,6 +140,31 @@ Then evaluate them all at once with `--adv-dir <repo>/adv_frames --seq all`
 
 ---
 
+## Attack success metrics (optional)
+
+A separate Module‑4 check ([`attack_metric.py`](lidar_pipeline/attack_metric.py))
+reports how much the attack degrades the *detector* on the target vehicle —
+3‑D IoU and confidence drop, with an attack success rate (IoU < 0.55 AND
+drop > 0.75). It runs on CPU (no PointPillars) and is independent of the tracking
+evaluation. `--adv-dir` accepts a flat folder or per‑seq subfolders, and `--seq`
+takes one id, several, or `all`.
+
+Single sequence (flat `adv_frames`):
+```bash
+cd <repo-root>
+python -m lidar_pipeline.attack_metric --seq 0000 --adv-dir ./adv_frames
+```
+
+Multiple / all sequences (per‑seq `adv_frames/<seq>/` layout) — prints a table +
+summary per sequence, then an overall aggregate:
+```bash
+python -m lidar_pipeline.attack_metric --seq 0000 0001 0002 --adv-dir ./adv_frames
+python -m lidar_pipeline.attack_metric --seq all --adv-dir ./adv_frames
+```
+Quick check on a few pairs: add `--max-pairs 12`.
+
+---
+
 ## Run the evaluation
 The detector config's `_BASE_CONFIG_` resolves relative to `OpenPCDet/tools`, so
 run from there with the repo on `PYTHONPATH`:
