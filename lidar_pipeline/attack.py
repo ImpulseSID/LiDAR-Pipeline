@@ -644,6 +644,7 @@ if __name__ == "__main__":
     import argparse
     from lidar_pipeline.loader import (
         get_all_frames, load_bin_file, default_velodyne_dir, DEFAULT_SEQUENCE,
+        list_tracking_sequences,
     )
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -652,8 +653,10 @@ if __name__ == "__main__":
         description="Module 4 — POPA Attack (Partial Object Persistence)"
     )
     parser.add_argument(
-        "--seq", type=str, default=DEFAULT_SEQUENCE,
-        help=f"KITTI tracking sequence id to attack (default: {DEFAULT_SEQUENCE})",
+        "--seq", type=str, nargs="+", default=[DEFAULT_SEQUENCE],
+        help=f"KITTI tracking sequence id(s) to attack, space-separated, or "
+             f"'all' (default: {DEFAULT_SEQUENCE}). With more than one sequence "
+             f"(or 'all'), frames are written to <out>/<seq>/ instead of <out>/.",
     )
     parser.add_argument(
         "--data-dir", type=str, default=None,
@@ -701,54 +704,74 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Resolve the sequence list ('all' -> every available tracking sequence).
+    if len(args.seq) == 1 and args.seq[0].lower() == "all":
+        seqs = list_tracking_sequences()
+    else:
+        seqs = args.seq
+    multi = len(seqs) > 1
+
+    if multi and args.data_dir:
+        print("\n  [ERROR] --data-dir cannot be combined with multiple sequences.")
+        sys.exit(1)
+
     print("\n\tModule 4 — POPA Attack")
     print("-" * 72)
 
-    DATA_DIR = Path(args.data_dir) if args.data_dir else default_velodyne_dir(args.seq)
+    total_written = 0
+    for seq in seqs:
+        DATA_DIR = Path(args.data_dir) if args.data_dir else default_velodyne_dir(seq)
+        # Per-seq subfolder when attacking >1 sequence; flat output for a single one.
+        out_dir = str(Path(args.out) / seq) if multi else args.out
 
-    all_frames = get_all_frames(DATA_DIR)
-    if not (0 <= args.start < len(all_frames)):
-        print(f"\n  [ERROR] Start index {args.start} out of range "
-              f"(0–{len(all_frames) - 1}).")
-        sys.exit(1)
+        all_frames = get_all_frames(DATA_DIR)
+        if not (0 <= args.start < len(all_frames)):
+            print(f"\n  [ERROR] seq {seq}: start index {args.start} out of range "
+                  f"(0-{len(all_frames) - 1}).")
+            sys.exit(1)
 
-    end = min(args.start + args.count, len(all_frames))
-    frame_paths = all_frames[args.start:end]
-    print(f"\n  Dataset frames : {frame_paths[0].name} … {frame_paths[-1].name} "
-          f"({len(frame_paths)} frames)")
-    print(f"  Cadence        : attack {args.attack_burst}, "
-          f"cool down {args.cooldown}")
+        end = min(args.start + args.count, len(all_frames))
+        frame_paths = all_frames[args.start:end]
 
-    region_names = _make_region_names(args.n_flicker)
+        print(f"\n  Sequence       : {seq}")
+        print(f"  Dataset frames : {frame_paths[0].name} ... {frame_paths[-1].name} "
+              f"({len(frame_paths)} frames)")
+        print(f"  Cadence        : attack {args.attack_burst}, "
+              f"cool down {args.cooldown}")
+        print(f"  Output dir     : {out_dir}")
 
-    saved = generate_adversarial_sequence(
-        frame_paths=frame_paths,
-        output_dir=args.out,
-        attack_burst=args.attack_burst,
-        cooldown=args.cooldown,
-        voxel_size=args.voxel_size,
-        region_names=region_names,
-        persistent=PERSISTENT_REGIONS,
-        core_fraction=args.core_fraction,
-        write_cooldown=not args.skip_cooldown,
-        random_seed=42,
-        verbose=True,
-    )
+        region_names = _make_region_names(args.n_flicker)
 
-    # POPA guarantee: every attacked frame keeps the persistent visible core.
-    for idx in range(len(frame_paths)):
-        if is_attack_frame(idx, args.attack_burst, args.cooldown):
-            kept = popa_regions_for_frame(
-                idx, region_names, PERSISTENT_REGIONS,
-                args.attack_burst, args.cooldown,
-            )
-            for pr in PERSISTENT_REGIONS:
-                assert pr in kept, f"Frame {idx}: '{pr}' must persist"
+        saved = generate_adversarial_sequence(
+            frame_paths=frame_paths,
+            output_dir=out_dir,
+            attack_burst=args.attack_burst,
+            cooldown=args.cooldown,
+            voxel_size=args.voxel_size,
+            region_names=region_names,
+            persistent=PERSISTENT_REGIONS,
+            core_fraction=args.core_fraction,
+            write_cooldown=not args.skip_cooldown,
+            random_seed=42,
+            verbose=True,
+        )
 
-    print(f"  Example outputs:")
-    for p in saved[:4]:
-        arr = load_bin_file(p)
-        print(f"    {p.name:<16}  shape {arr.shape}")
-    if len(saved) > 4:
-        print(f"    ... and {len(saved) - 4} more")
-    print()
+        # POPA guarantee: every attacked frame keeps the persistent visible core.
+        for idx in range(len(frame_paths)):
+            if is_attack_frame(idx, args.attack_burst, args.cooldown):
+                kept = popa_regions_for_frame(
+                    idx, region_names, PERSISTENT_REGIONS,
+                    args.attack_burst, args.cooldown,
+                )
+                for pr in PERSISTENT_REGIONS:
+                    assert pr in kept, f"Frame {idx}: '{pr}' must persist"
+
+        total_written += len(saved)
+        print(f"  Example outputs:")
+        for p in saved[:4]:
+            arr = load_bin_file(p)
+            print(f"    {p.name:<16}  shape {arr.shape}")
+        if len(saved) > 4:
+            print(f"    ... and {len(saved) - 4} more")
+
+    print(f"\n  Done. {len(seqs)} sequence(s), {total_written} files written.\n")
