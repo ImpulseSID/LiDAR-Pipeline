@@ -41,7 +41,9 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lidar_pipeline.loader import load_bin_file, default_velodyne_dir, DEFAULT_SEQUENCE
+from lidar_pipeline.loader import (
+    load_bin_file, default_velodyne_dir, DEFAULT_SEQUENCE, list_tracking_sequences,
+)
 from lidar_pipeline.voxelization import voxelize
 from lidar_pipeline.semantic_segmentation import segment_point_cloud, CLASS_VEHICLE
 from lidar_pipeline.instance_segmentation import instance_segment, cluster_summary
@@ -289,45 +291,34 @@ def _print_summary(results: list[dict], n_clean: int, n_skipped: int) -> None:
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Module 4 — Attack Success Metrics (IoU + Confidence Drop)"
-    )
-    parser.add_argument("--seq", type=str, default=DEFAULT_SEQUENCE,
-                        help=f"KITTI tracking sequence for the original frames "
-                             f"(default: {DEFAULT_SEQUENCE})")
-    parser.add_argument("--orig-dir", type=str, default=None,
-                        help="Directory with original NNNNNN.bin frames "
-                             "(default: the --seq folder under the tracking dataset)")
-    parser.add_argument("--adv-dir", type=str, default=str(DEFAULT_ADV_DIR),
-                        help="Directory with adversarial adv_NNNN.bin frames")
-    parser.add_argument("--voxel-size", type=float, default=VOXEL_SIZE,
-                        help=f"Voxel size for the detector (default: {VOXEL_SIZE})")
-    parser.add_argument("--max-pairs", type=int, default=None,
-                        help="Evaluate at most this many pairs (default: all)")
-    parser.add_argument("--include-clean", action="store_true", default=False,
-                        help="Also report untouched cooldown frames (IoU=1, drop=0)")
-    args = parser.parse_args()
+def _adv_dir_for_seq(adv_dir: Path, seq: str) -> Path:
+    """Per-sequence adv subfolder (<adv_dir>/<seq>) if it exists, else the flat dir."""
+    per_seq = adv_dir / seq
+    if per_seq.is_dir() and any(per_seq.glob("adv_*.bin")):
+        return per_seq
+    return adv_dir
 
-    sys.stdout.reconfigure(encoding="utf-8")
 
-    orig_dir = Path(args.orig_dir) if args.orig_dir else default_velodyne_dir(args.seq)
-    adv_dir = Path(args.adv_dir)
-
-    print("\n\tModule 4 — Attack Metrics")
-    print("-" * 80)
-
+def _evaluate_seq(
+    seq: str,
+    orig_dir: Path,
+    adv_dir: Path,
+    voxel_size: float,
+    max_pairs: Optional[int],
+    include_clean: bool,
+) -> Optional[list[dict]]:
+    """Evaluate one sequence: print its table + summary, return its results list."""
+    print(f"\n  Sequence           : {seq}")
     if not adv_dir.exists():
         print(f"  [ERROR] Adversarial directory not found: {adv_dir}")
-        return 1
+        return None
 
     pairs = discover_pairs(orig_dir, adv_dir)
     if not pairs:
-        print(f"  [ERROR] No adv_*.bin ↔ original pairs found.")
-        return 1
-
-    if args.max_pairs is not None:
-        pairs = pairs[:args.max_pairs]
+        print(f"  [ERROR] No adv_*.bin <-> original pairs found in {adv_dir}.")
+        return None
+    if max_pairs is not None:
+        pairs = pairs[:max_pairs]
 
     print(f"  Original frames    : {orig_dir}")
     print(f"  Adversarial frames : {adv_dir}")
@@ -342,13 +333,11 @@ def main() -> int:
     results: list[dict] = []
     n_clean = 0
     n_skipped = 0
-    total = len(pairs)
 
     for i, (orig_path, adv_path) in enumerate(pairs, 1):
-        # Live status so long runs don't look frozen.
         print(f"  {i:>4} {adv_path.name:<14} ...", end="\r", flush=True)
 
-        metrics = evaluate_pair(orig_path, adv_path, voxel_size=args.voxel_size)
+        metrics = evaluate_pair(orig_path, adv_path, voxel_size=voxel_size)
 
         if metrics is None:
             n_skipped += 1
@@ -358,7 +347,7 @@ def main() -> int:
 
         if metrics["clean"]:
             n_clean += 1
-            if not args.include_clean:
+            if not include_clean:
                 print(f"  {i:>4} {adv_path.name:<14} "
                       f"{'1.000':>7} {'—':>9} {'—':>8} {'0.000':>7} "
                       f"{'clean':>9}")
@@ -377,11 +366,77 @@ def main() -> int:
         results.append(metrics)
 
     if not results:
-        print("\n  [ERROR] No evaluable attacked pairs "
+        print("  [WARN] No evaluable attacked pairs for this sequence "
               "(only clean frames or no target vehicle).")
-        return 1
+        return []
 
     _print_summary(results, n_clean, n_skipped)
+    return results
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Module 4 — Attack Success Metrics (IoU + Confidence Drop)"
+    )
+    parser.add_argument("--seq", type=str, nargs="+", default=[DEFAULT_SEQUENCE],
+                        help=f"KITTI tracking sequence id(s) for the original "
+                             f"frames, space-separated, or 'all' "
+                             f"(default: {DEFAULT_SEQUENCE}). With >1 sequence the "
+                             f"per-seq adv subfolder <adv-dir>/<seq> is used.")
+    parser.add_argument("--orig-dir", type=str, default=None,
+                        help="Directory with original NNNNNN.bin frames "
+                             "(default: the --seq folder under the tracking dataset; "
+                             "single sequence only)")
+    parser.add_argument("--adv-dir", type=str, default=str(DEFAULT_ADV_DIR),
+                        help="Directory with adversarial adv_NNNN.bin frames "
+                             "(flat, or with per-seq <adv-dir>/<seq> subfolders)")
+    parser.add_argument("--voxel-size", type=float, default=VOXEL_SIZE,
+                        help=f"Voxel size for the detector (default: {VOXEL_SIZE})")
+    parser.add_argument("--max-pairs", type=int, default=None,
+                        help="Evaluate at most this many pairs per sequence "
+                             "(default: all)")
+    parser.add_argument("--include-clean", action="store_true", default=False,
+                        help="Also report untouched cooldown frames (IoU=1, drop=0)")
+    args = parser.parse_args()
+
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    # Resolve the sequence list ('all' -> every available tracking sequence).
+    if len(args.seq) == 1 and args.seq[0].lower() == "all":
+        seqs = list_tracking_sequences()
+    else:
+        seqs = args.seq
+    multi = len(seqs) > 1
+
+    if multi and args.orig_dir:
+        print("\n  [ERROR] --orig-dir cannot be combined with multiple sequences.")
+        return 1
+
+    adv_root = Path(args.adv_dir)
+
+    print("\n\tModule 4 — Attack Metrics")
+    print("-" * 80)
+
+    all_results: list[dict] = []
+    for seq in seqs:
+        orig_dir = Path(args.orig_dir) if args.orig_dir else default_velodyne_dir(seq)
+        this_adv = _adv_dir_for_seq(adv_root, seq)
+        res = _evaluate_seq(
+            seq, orig_dir, this_adv,
+            args.voxel_size, args.max_pairs, args.include_clean,
+        )
+        if res:
+            all_results.extend(res)
+
+    if not all_results:
+        print("\n  [ERROR] No evaluable attacked pairs across the requested "
+              "sequence(s).")
+        return 1
+
+    if multi:
+        print("\n  ===== Overall (all sequences) =====")
+        _print_summary(all_results, 0, 0)
+
     return 0
 
 
